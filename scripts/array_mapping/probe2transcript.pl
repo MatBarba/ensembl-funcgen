@@ -225,7 +225,7 @@ $main::_log_file = undef;
 $main::_tee      = 0;
 local $| = 1; # auto flush stdout
 our $Helper = Bio::EnsEMBL::Funcgen::Utils::Helper->new();
-my $debug = 0;
+my $debug = 1;
 
 #Array format config for current vendors
 my %array_format_config =
@@ -317,7 +317,7 @@ sub rollback_arrays {
   . ' -dbuser '       . $options->{xref_user}
   . ' -dbport '       . $options->{xref_port}
 
-  . ' -dnadb_pass '   . $options->{transcript_pass}
+#  . ' -dnadb_pass '   . $options->{transcript_pass}
   . ' -dnadb_port '   . $options->{transcript_port}
   . ' -dnadb_name '   . $options->{transcript_dbname}
   . ' -dnadb_host '   . $options->{transcript_host}
@@ -364,7 +364,7 @@ sub main {
     delete_existing_xrefs($options->{array_names});
   } else{
     $Helper->log_header('Checking existing Xrefs');
-    check_existing_and_exit($xref_db, $options);
+    check_existing_and_exit($xref_db, $transc_edb_name, $options);
   }
   $Helper->log('Checking that all probes link to analyses', 0, 'append_date');
   check_probe_analysis_join($probe_db);
@@ -842,11 +842,11 @@ sub get_arrays {
       croak("Could not find $vendor $name array in DB");
     }
 
-    $array_format ||= $array->format();
-
-    if($array->format ne $array_format) {
-      croak('You must not map arrays of different formats in the same process');
-    }
+#     $array_format ||= $array->format();
+# 
+#     if($array->format ne $array_format) {
+#       croak('You must not map arrays of different formats in the same process');
+#     }
 
     $arrays{$name} = $array;
   }
@@ -1196,7 +1196,7 @@ sub cache_arrays_per_object {
        USING(probe_set_id)
       JOIN array_chip ac 
         USING(array_chip_id)
-      JON array a
+      JOIN array a
         USING(array_id)
     WHERE 
       a.name in ("'.join('", "', @{$options->{array_names}}).'") 
@@ -1240,6 +1240,9 @@ sub cache_arrays_per_object {
       if ( defined $probeset_sizes{$object_id} && $probeset_size !=  $probeset_sizes{$object_id}) {
         warn("Found probeset(dbID=$object_id) with differing size between arrays:\ti".join(", ", @{$arrays_per_object{$object_id}})." and $array($probeset_size)\n");
       }
+      if (! exists $probeset_sizes{$object_id} ) {
+	$probeset_sizes{$object_id} = $probeset_size;
+      }
       if ($probeset_sizes{$object_id} < $probeset_size) {
         $probeset_sizes{$object_id} = $probeset_size;
       }
@@ -1281,16 +1284,16 @@ sub calculate_utrs {
   # Compute a typical utr length from the measured values
   foreach my $side (5,3) {
     if(! defined $unannotated_utrs->{$side}) {
-      my $count = scalar @{$lengths{side}};
+      my $count = scalar @{$lengths{$side}};
       my $zero_count = (scalar @$transcripts) - $count;
       $Helper->log("Seen $count ${side}' UTRs, $zero_count have length 0");
 
       if($count) {
-	my ($mean, $remainder) = split/\./, mean($lengths{side});
+	my ($mean, $remainder) = split/\./, mean($lengths{$side});
 	if ($remainder =~ /^[5-9]/) {
 	  $mean++;
 	}
-	my $median = median($lengths{side});
+	my $median = median($lengths{$side});
 	$unannotated_utrs->{$side}  = ($mean > $median)  ? $mean : $median;
 	$Helper->log("Calculated default unannotated ${side}' UTR length:\t$unannotated_utrs->{$side}");
       } else{
@@ -1335,7 +1338,7 @@ sub write_extended_transcripts_into_file {
   foreach my $end(5, 3) {
     my $total_length = 0;
     foreach my $utr_count (@{$utr_counts->{$end}}) {
-      $total_length += $_;
+      $total_length += $utr_count;
     } 
     my $num_utrs = scalar(@{$utr_counts->{$end}});
     my $average = ($num_utrs) ? ($total_length/$num_utrs) : 0;
@@ -1372,11 +1375,11 @@ sub write_extended_transcript {
   my $new_end;
   # Check whether the transcript is on the postive/undefined or negative strand
   if ($transcript->strand() >= 0) {
-    $new_start = $transcript->seq_region_start - $options->{$transcript_sid}{flanks}{5};
-    $new_end   = $transcript->seq_region_end + $options->{$transcript_sid}{flanks}{3};
+    $new_start = $transcript->seq_region_start - $options->{flanks}{$transcript_sid}{5};
+    $new_end   = $transcript->seq_region_end + $options->{flanks}{$transcript_sid}{3};
   } else {
-    $new_start = $transcript->seq_region_start - $options->{$transcript_sid}{flanks}{3};
-    $new_end = $transcript->seq_region_end + $options->{$transcript_sid}{flanks}{5};
+    $new_start = $transcript->seq_region_start - $options->{flanks}{$transcript_sid}{3};
+    $new_end = $transcript->seq_region_end + $options->{flanks}{$transcript_sid}{5};
   }
 
   if ($new_start < 0) {
@@ -1453,7 +1456,7 @@ sub dump_probe_features {
     JOIN seq_region 
       USING(seq_region_id) 
   WHERE 
-    array.name IN \"$names\" 
+    array.name IN (\"$names\") 
     AND array.vendor=\"$options->{vendor}\" 
   GROUP BY 
     probe_feature_id, probe_id, probe_set_id 
@@ -2074,6 +2077,8 @@ sub log_unmapped_object {
 
 sub remove_promiscuous_objects {
   my ($object_transcript_hits, $unmapped_counts, $unmapped_objects, $options, $OUT) = @_;
+  
+  print "Before remove_promiscuous_objects: " . scalar keys %$object_transcript_hits . "\n";
 
   foreach my $object_id (keys %$object_transcript_hits) {
     my $object_transcript_count = scalar keys %{$object_transcript_hits->{$object_id}};
@@ -2086,6 +2091,9 @@ sub remove_promiscuous_objects {
       delete $object_transcript_hits->{$object_id};
     }
   }
+  
+  print "After remove_promiscuous_objects: " . scalar keys %$object_transcript_hits . "\n";
+  
   return;
 }
 
@@ -2331,7 +2339,7 @@ sub add_mart_displayable_status {
       FROM 
         array a, status_name sn 
       WHERE 
-        a.name in ($names_string)
+        a.name in (\"$names_string\")
         AND a.vendor='$vendor'
 	AND sn.name in ('MART_DISPLAYABLE')
   ";
@@ -2458,7 +2466,8 @@ sub set_unmapped_reason_id {
   # Check if unmapped reason is cached
   if(!defined($options->{desc_to_id}{$unmapped_object->{'description'}})){
     # Try to store it
-    $unmapped_object->{'unmapped_reason_id'} = create_unmapped_reason($db, $unmapped_object);
+    #$unmapped_object->{'unmapped_reason_id'} = create_unmapped_reason($db, $unmapped_object);
+    $unmapped_object->{'unmapped_reason_id'} = create_unmapped_reason($unmapped_object, $options->{unmapped_object_adaptor});
     $options->{desc_to_id}{$unmapped_object->{'description'}} = $unmapped_object->{'unmapped_reason_id'};
   } else{
     $unmapped_object->{'unmapped_reason_id'} = $options->{desc_to_id}{$unmapped_object->{'description'}};
